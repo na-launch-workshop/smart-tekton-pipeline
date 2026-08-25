@@ -1,0 +1,29 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: smart-pipeline-run-
+  labels:
+    app.kubernetes.io/part-of: smart-pipeline
+spec:
+  pipelineRef:
+    name: smart-pipeline
+  params:
+    - name: git-url
+      value: "https://gitlab.apps.rosa.rosa-s9prg.8un1.p3.openshiftapps.com/root/smart-pipeline-app.git"
+    - name: git-revision
+      value: "main"
+    - name: claude-model
+      value: "claude-opus-4-6"
+    - name: gcp-project
+      value: "lightwell-devel"
+    - name: gcp-region
+      value: "us-east5"
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi

@@ -1,0 +1,364 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: claude-review
+  labels:
+    app.kubernetes.io/part-of: smart-pipeline
+spec:
+  description: >
+    Uses Claude as a personal assistant to review code changes before build.
+    Not a replacement for linters/scanners — a first-pass second pair of eyes.
+  params:
+    - name: model
+      type: string
+      default: "claude-sonnet-5"
+      description: Claude model to use (claude-sonnet-5, claude-haiku-4-5-20251001, etc)
+    - name: gcp-project
+      type: string
+      description: GCP project ID for Vertex AI
+    - name: gcp-region
+      type: string
+      default: "us-east5"
+      description: GCP region for Vertex AI endpoint
+    - name: rules-path
+      type: string
+      default: "rules/review-rules.json"
+      description: Path to the review rules file relative to the repo root
+    - name: base-ref
+      type: string
+      default: "origin/main"
+      description: Base git ref to diff against
+  workspaces:
+    - name: source
+      description: The cloned source code
+  results:
+    - name: decision
+      description: "Review decision: approve, warn, or block"
+    - name: summary
+      description: Brief summary of the review findings
+    - name: findings-count
+      description: Number of findings reported
+  steps:
+    - name: review
+      image: python:3-alpine
+      env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/var/secrets/gcp/key.json"
+        - name: GCP_PROJECT
+          value: "$(params.gcp-project)"
+        - name: GCP_REGION
+          value: "$(params.gcp-region)"
+        - name: CLAUDE_MODEL
+          value: "$(params.model)"
+        - name: RULES_PATH
+          value: "$(params.rules-path)"
+        - name: BASE_REF
+          value: "$(params.base-ref)"
+        - name: WORKSPACE
+          value: "$(workspaces.source.path)/source"
+      volumeMounts:
+        - name: gcp-sa-key
+          mountPath: /var/secrets/gcp
+          readOnly: true
+      script: |
+        #!/usr/bin/env python3
+        import subprocess, sys
+        subprocess.run(["apk", "add", "--no-cache", "git"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                        "google-auth", "requests"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        import json, os, urllib.request, urllib.error
+        import google.auth
+        import google.auth.transport.requests
+        from google.oauth2 import service_account
+
+        GCP_PROJECT = os.environ["GCP_PROJECT"]
+        GCP_REGION = os.environ["GCP_REGION"]
+        MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
+        WORKSPACE = os.environ["WORKSPACE"]
+        RULES_PATH = os.environ.get("RULES_PATH", "rules/review-rules.json")
+        BASE_REF = os.environ.get("BASE_REF", "origin/main")
+        MAX_DIFF_SIZE = 100_000
+        MAX_TOKENS = 4096
+
+        API_URL = (
+            f"https://{GCP_REGION}-aiplatform.googleapis.com/v1/"
+            f"projects/{GCP_PROJECT}/locations/{GCP_REGION}/"
+            f"publishers/anthropic/models/{MODEL}:rawPredict"
+        )
+
+        DECISION_PATH = "$(results.decision.path)"
+        SUMMARY_PATH = "$(results.summary.path)"
+        COUNT_PATH = "$(results.findings-count.path)"
+
+        DEFAULT_RULES = {
+            "rules": [
+                {"id": "obvious-bugs", "name": "Obvious Bugs",
+                 "description": "Logic errors, off-by-one, null dereferences, infinite loops",
+                 "severity": "block", "enabled": True},
+                {"id": "secrets-leak", "name": "Hardcoded Secrets",
+                 "description": "Passwords, API keys, tokens, or credentials in code",
+                 "severity": "block", "enabled": True},
+                {"id": "error-handling", "name": "Error Handling Gaps",
+                 "description": "Missing error handling, swallowed exceptions",
+                 "severity": "warn", "enabled": True},
+                {"id": "code-smell", "name": "Code Smells",
+                 "description": "Complex functions, poor naming, duplication",
+                 "severity": "warn", "enabled": True}
+            ],
+            "thresholds": {"max_block_findings": 0, "max_warn_findings": 5}
+        }
+
+        SYSTEM_PROMPT = """\
+        You are a code review assistant in a CI/CD pipeline. You are a senior \
+        developer doing a quick first-pass review before formal build and test stages.
+
+        You are NOT replacing linters, security scanners, or test suites. You are a \
+        friendly second pair of eyes catching things those tools typically miss: logic \
+        errors, design issues, race conditions, or obvious problems that would waste \
+        time later in the pipeline.
+
+        Be practical, not pedantic. Only flag things that genuinely matter. \
+        If the code looks good, say so.
+
+        Respond ONLY with valid JSON matching this schema:
+        {
+          "decision": "approve | warn | block",
+          "summary": "1-2 sentence overall assessment",
+          "findings": [
+            {
+              "rule_id": "matching rule id",
+              "severity": "block | warn | info",
+              "file": "file path",
+              "line": null,
+              "title": "short title",
+              "description": "clear explanation of the concern"
+            }
+          ],
+          "suggestions": ["optional improvement ideas"]
+        }
+
+        Decision guidelines:
+        - "approve": No significant issues. Code is ready for build.
+        - "warn": Some concerns worth noting, but nothing blocking. Build can proceed.
+        - "block": Serious issues that should be addressed before building."""
+
+        IGNORED_DIRS = {'.git', 'node_modules', '__pycache__', '.venv',
+                        'vendor', '.tox', '.mypy_cache', 'dist', 'build'}
+        CODE_EXTENSIONS = {'.py', '.go', '.js', '.ts', '.jsx', '.tsx', '.java',
+                           '.rb', '.rs', '.c', '.cpp', '.h', '.cs', '.sh',
+                           '.yaml', '.yml', '.json', '.tf', '.hcl', '.sql'}
+        CODE_FILENAMES = {'Dockerfile', 'Makefile', 'Jenkinsfile', 'Taskfile'}
+
+
+        def get_access_token():
+            creds = service_account.Credentials.from_service_account_file(
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            creds.refresh(google.auth.transport.requests.Request())
+            return creds.token
+
+
+        def run_git(*args):
+            r = subprocess.run(["git"] + list(args),
+                               capture_output=True, text=True, cwd=WORKSPACE)
+            return r
+
+
+        def get_code_changes():
+            for ref in [BASE_REF, "HEAD~1"]:
+                r = run_git("diff", ref, "HEAD")
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout[:MAX_DIFF_SIZE]
+
+            print("No git diff available — reviewing all source files")
+            parts = []
+            total = 0
+            for root, dirs, files in os.walk(WORKSPACE):
+                dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+                for fname in sorted(files):
+                    ext = os.path.splitext(fname)[1]
+                    if ext not in CODE_EXTENSIONS and fname not in CODE_FILENAMES:
+                        continue
+                    fpath = os.path.join(root, fname)
+                    relpath = os.path.relpath(fpath, WORKSPACE)
+                    try:
+                        with open(fpath) as f:
+                            content = f.read(50_000)
+                    except Exception:
+                        continue
+                    chunk = f"=== {relpath} ===\n{content}\n"
+                    parts.append(chunk)
+                    total += len(chunk)
+                    if total > MAX_DIFF_SIZE:
+                        break
+                if total > MAX_DIFF_SIZE:
+                    break
+            return "\n".join(parts)[:MAX_DIFF_SIZE]
+
+
+        def load_rules():
+            path = os.path.join(WORKSPACE, RULES_PATH)
+            if os.path.isfile(path):
+                with open(path) as f:
+                    rules = json.load(f)
+                print(f"Loaded rules from {RULES_PATH}")
+                return rules
+            print("Rules file not found — using defaults")
+            return DEFAULT_RULES
+
+
+        def call_claude(system, user_msg):
+            token = get_access_token()
+            body = json.dumps({
+                "anthropic_version": "vertex-2023-10-16",
+                "max_tokens": MAX_TOKENS,
+                "system": system,
+                "messages": [{"role": "user", "content": user_msg}]
+            }).encode()
+            req = urllib.request.Request(API_URL, data=body, headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            })
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read())
+                return data["content"][0]["text"]
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode()
+                print(f"Vertex AI error ({e.code}): {err_body}", file=sys.stderr)
+                sys.exit(1)
+
+
+        def parse_review(raw):
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+            if text.endswith("```"):
+                text = text.rsplit("```", 1)[0]
+            text = text.strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                start, end = text.find("{"), text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    return json.loads(text[start:end])
+                raise
+
+
+        def apply_thresholds(review, rules):
+            thresholds = rules.get("thresholds", {})
+            findings = review.get("findings", [])
+            blocks = sum(1 for f in findings if f.get("severity") == "block")
+            warns = sum(1 for f in findings if f.get("severity") == "warn")
+
+            if blocks > thresholds.get("max_block_findings", 0):
+                return "block"
+            if warns > thresholds.get("max_warn_findings", 5):
+                return "block"
+            if warns > 0:
+                return "warn"
+            return review.get("decision", "approve")
+
+
+        def write_result(path, value):
+            with open(path, "w") as f:
+                f.write(str(value))
+
+
+        def main():
+            print("=" * 60)
+            print("  CLAUDE CODE REVIEW (via Vertex AI)")
+            print("=" * 60)
+
+            rules = load_rules()
+            enabled = [r for r in rules.get("rules", []) if r.get("enabled", True)]
+            print(f"Active rules: {len(enabled)}")
+
+            print("\nGathering code changes...")
+            changes = get_code_changes()
+            if not changes.strip():
+                print("No changes found — auto-approving.")
+                write_result(DECISION_PATH, "approve")
+                write_result(SUMMARY_PATH, "No code changes to review")
+                write_result(COUNT_PATH, "0")
+                return
+
+            print(f"Reviewing {len(changes):,} characters of code...\n")
+
+            user_msg = (
+                "## Review Rules\n"
+                f"{json.dumps(enabled, indent=2)}\n\n"
+                "## Code Changes\n"
+                f"```\n{changes}\n```\n\n"
+                "Review these changes against the rules above. "
+                "Return your assessment as JSON."
+            )
+
+            print(f"Calling Claude ({MODEL}) via Vertex AI...")
+            print(f"  Project: {GCP_PROJECT}")
+            print(f"  Region:  {GCP_REGION}")
+            raw = call_claude(SYSTEM_PROMPT, user_msg)
+
+            try:
+                review = parse_review(raw)
+            except Exception as e:
+                print(f"WARNING: Could not parse response: {e}", file=sys.stderr)
+                print(f"Raw (first 500 chars): {raw[:500]}", file=sys.stderr)
+                write_result(DECISION_PATH, "warn")
+                write_result(SUMMARY_PATH, "Review ran but response could not be parsed")
+                write_result(COUNT_PATH, "0")
+                return
+
+            decision = apply_thresholds(review, rules)
+            summary = review.get("summary", "No summary")
+            findings = review.get("findings", [])
+            suggestions = review.get("suggestions", [])
+
+            print(f"\n{'=' * 60}")
+            marker = {"approve": "APPROVED", "warn": "WARNING", "block": "BLOCKED"}
+            print(f"  DECISION: {marker.get(decision, decision.upper())}")
+            print(f"{'=' * 60}")
+            print(f"\n{summary}\n")
+
+            if findings:
+                print(f"Findings ({len(findings)}):")
+                print("-" * 50)
+                for f in findings:
+                    sev = f.get("severity", "info").upper()
+                    title = f.get("title", "Untitled")
+                    loc = f.get("file", "?")
+                    if f.get("line"):
+                        loc += f":{f['line']}"
+                    desc = f.get("description", "")
+                    print(f"  [{sev}] {title}")
+                    print(f"    at {loc}")
+                    print(f"    {desc}\n")
+
+            if suggestions:
+                print("Suggestions:")
+                for s in suggestions:
+                    print(f"  * {s}")
+                print()
+
+            print("=" * 60)
+            write_result(DECISION_PATH, decision)
+            write_result(SUMMARY_PATH, summary[:4000])
+            write_result(COUNT_PATH, str(len(findings)))
+
+            if decision == "block":
+                print("Pipeline BLOCKED — fix the issues above and push again.")
+                sys.exit(1)
+            elif decision == "warn":
+                print("Proceeding to build with warnings.")
+            else:
+                print("All clear — proceeding to build.")
+
+
+        main()
+  volumes:
+    - name: gcp-sa-key
+      secret:
+        secretName: gcp-vertex-sa-key
