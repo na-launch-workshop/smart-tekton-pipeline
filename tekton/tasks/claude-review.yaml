@@ -48,11 +48,17 @@ spec:
         import json, os, subprocess, sys
         from pathlib import Path
 
+        import urllib.request, urllib.error
+
         from langchain_anthropic import ChatAnthropic
         from langchain_core.tools import tool
         from langgraph.prebuilt import create_react_agent
 
-        VAULT_SECRET_PATH = "/vault/secrets/anthropic"
+        VAULT_ADDR  = "http://vault.vault.svc.cluster.local:8200"
+        VAULT_ROLE  = "smart-pipeline-role"
+        VAULT_PATH  = "kv/data/secrets/common/anthropic"
+        SA_JWT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
         MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
         WORKSPACE  = os.environ["WORKSPACE"]
         RULES_PATH = os.environ.get("RULES_PATH", "rules/review-rules.json")
@@ -272,6 +278,24 @@ spec:
                 return "warn"
             return review.get("decision", "approve")
 
+        def load_api_key():
+            with open(SA_JWT_PATH) as f:
+                jwt = f.read().strip()
+            login_body = json.dumps({"role": VAULT_ROLE, "jwt": jwt}).encode()
+            req = urllib.request.Request(
+                f"{VAULT_ADDR}/v1/auth/kubernetes/login",
+                data=login_body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                vault_token = json.loads(resp.read())["auth"]["client_token"]
+            req = urllib.request.Request(
+                f"{VAULT_ADDR}/v1/{VAULT_PATH}",
+                headers={"X-Vault-Token": vault_token},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())["data"]["data"]["api-key"]
+
         def write_result(path, value):
             with open(path, "w") as f:
                 f.write(str(value))
@@ -298,8 +322,7 @@ spec:
 
             print(f"Reviewing {len(changes):,} characters of code\n")
 
-            with open(VAULT_SECRET_PATH) as f:
-                api_key = f.read().strip()
+            api_key = load_api_key()
 
             llm = ChatAnthropic(model=MODEL, api_key=api_key, max_tokens=4096)
             tools = [run_linter, check_secrets, audit_dependencies, run_tests, read_file]
