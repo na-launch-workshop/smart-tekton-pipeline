@@ -33,7 +33,7 @@ spec:
       description: Number of findings reported
   steps:
     - name: review
-      image: quay.apps.cluster-x7f6f.dyn.redhatworkshops.io/quayadmin/smart-pipeline-review:latest
+      image: image-registry.openshift-image-registry.svc:5000/workspace-images/smart-pipeline-review:latest
       env:
         - name: CLAUDE_MODEL
           value: "$(params.model)"
