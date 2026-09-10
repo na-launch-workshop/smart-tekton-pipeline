@@ -14,6 +14,16 @@ spec:
       value: "main"
     - name: claude-model
       value: "claude-sonnet-5"
+  taskRunTemplate:
+    podTemplate:
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "smart-pipeline-role"
+        vault.hashicorp.com/agent-inject-secret-anthropic: "kv/data/secrets/common/anthropic"
+        vault.hashicorp.com/agent-inject-template-anthropic: |
+          {{- with secret "kv/data/secrets/common/anthropic" -}}
+          {{ .Data.data.api-key }}
+          {{- end }}
   workspaces:
     - name: shared-workspace
       volumeClaimTemplate:

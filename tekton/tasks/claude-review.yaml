@@ -35,11 +35,6 @@ spec:
     - name: review
       image: python:3-alpine
       env:
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: anthropic-api-key
-              key: api-key
         - name: CLAUDE_MODEL
           value: "$(params.model)"
         - name: RULES_PATH
@@ -58,6 +53,8 @@ spec:
                        stderr=subprocess.DEVNULL)
         import json, os
         import anthropic
+
+        VAULT_SECRET_PATH = "/vault/secrets/anthropic"
 
         MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
         WORKSPACE = os.environ["WORKSPACE"]
@@ -179,8 +176,13 @@ spec:
             return DEFAULT_RULES
 
 
+        def load_api_key():
+            with open(VAULT_SECRET_PATH) as f:
+                return f.read().strip()
+
+
         def call_claude(system, user_msg):
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(api_key=load_api_key())
             message = client.messages.create(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
