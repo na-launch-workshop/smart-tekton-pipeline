@@ -326,19 +326,17 @@ spec:
 
             llm = ChatAnthropic(model=MODEL, api_key=api_key, max_tokens=4096)
             tools = [run_linter, check_secrets, audit_dependencies, run_tests, read_file]
-            agent = create_react_agent(
-                llm, tools,
-                state_modifier=SYSTEM_PROMPT.format(rules=json.dumps(enabled, indent=2))
-            )
+            agent = create_react_agent(llm, tools)
 
             print(f"Starting agent ({MODEL})...")
             result = agent.invoke({
-                "messages": [(
-                    "human",
-                    f"Review these code changes and use tools where relevant:\n\n"
-                    f"```\n{changes}\n```\n\n"
-                    "Return your final assessment as a JSON object."
-                )]
+                "messages": [
+                    ("system", SYSTEM_PROMPT.format(rules=json.dumps(enabled, indent=2))),
+                    ("human",
+                     f"Review these code changes and use tools where relevant:\n\n"
+                     f"```\n{changes}\n```\n\n"
+                     "Return your final assessment as a JSON object."),
+                ]
             })
 
             final = result["messages"][-1].content
