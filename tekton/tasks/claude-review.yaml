@@ -33,7 +33,7 @@ spec:
       description: Number of findings reported
   steps:
     - name: review
-      image: python:3-alpine
+      image: quay.apps.cluster-x7f6f.dyn.redhatworkshops.io/quayadmin/smart-pipeline-review:latest
       env:
         - name: CLAUDE_MODEL
           value: "$(params.model)"
@@ -46,11 +46,6 @@ spec:
       script: |
         #!/usr/bin/env python3
         import subprocess, sys
-        subprocess.run(["apk", "add", "--no-cache", "git"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                        "anthropic"], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
         import json, os
         import anthropic
 
