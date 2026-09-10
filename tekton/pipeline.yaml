@@ -23,13 +23,6 @@ spec:
       type: string
       default: "claude-sonnet-5"
       description: Claude model for the review step
-    - name: gcp-project
-      type: string
-      description: GCP project ID for Vertex AI
-    - name: gcp-region
-      type: string
-      default: "us-east5"
-      description: GCP region for Vertex AI endpoint
 
   workspaces:
     - name: shared-workspace
@@ -66,10 +59,6 @@ spec:
       params:
         - name: model
           value: $(params.claude-model)
-        - name: gcp-project
-          value: $(params.gcp-project)
-        - name: gcp-region
-          value: $(params.gcp-region)
       workspaces:
         - name: source
           workspace: shared-workspace

@@ -13,13 +13,6 @@ spec:
       type: string
       default: "claude-sonnet-5"
       description: Claude model to use (claude-sonnet-5, claude-haiku-4-5-20251001, etc)
-    - name: gcp-project
-      type: string
-      description: GCP project ID for Vertex AI
-    - name: gcp-region
-      type: string
-      default: "us-east5"
-      description: GCP region for Vertex AI endpoint
     - name: rules-path
       type: string
       default: "rules/review-rules.json"
@@ -42,12 +35,11 @@ spec:
     - name: review
       image: python:3-alpine
       env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/var/secrets/gcp/key.json"
-        - name: GCP_PROJECT
-          value: "$(params.gcp-project)"
-        - name: GCP_REGION
-          value: "$(params.gcp-region)"
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: anthropic-api-key
+              key: api-key
         - name: CLAUDE_MODEL
           value: "$(params.model)"
         - name: RULES_PATH
@@ -56,37 +48,23 @@ spec:
           value: "$(params.base-ref)"
         - name: WORKSPACE
           value: "$(workspaces.source.path)/source"
-      volumeMounts:
-        - name: gcp-sa-key
-          mountPath: /var/secrets/gcp
-          readOnly: true
       script: |
         #!/usr/bin/env python3
         import subprocess, sys
         subprocess.run(["apk", "add", "--no-cache", "git"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                        "google-auth", "requests"], stdout=subprocess.DEVNULL,
+                        "anthropic"], stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
-        import json, os, urllib.request, urllib.error
-        import google.auth
-        import google.auth.transport.requests
-        from google.oauth2 import service_account
+        import json, os
+        import anthropic
 
-        GCP_PROJECT = os.environ["GCP_PROJECT"]
-        GCP_REGION = os.environ["GCP_REGION"]
         MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5")
         WORKSPACE = os.environ["WORKSPACE"]
         RULES_PATH = os.environ.get("RULES_PATH", "rules/review-rules.json")
         BASE_REF = os.environ.get("BASE_REF", "origin/main")
         MAX_DIFF_SIZE = 100_000
         MAX_TOKENS = 4096
-
-        API_URL = (
-            f"https://{GCP_REGION}-aiplatform.googleapis.com/v1/"
-            f"projects/{GCP_PROJECT}/locations/{GCP_REGION}/"
-            f"publishers/anthropic/models/{MODEL}:rawPredict"
-        )
 
         DECISION_PATH = "$(results.decision.path)"
         SUMMARY_PATH = "$(results.summary.path)"
@@ -152,15 +130,6 @@ spec:
         CODE_FILENAMES = {'Dockerfile', 'Makefile', 'Jenkinsfile', 'Taskfile'}
 
 
-        def get_access_token():
-            creds = service_account.Credentials.from_service_account_file(
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            creds.refresh(google.auth.transport.requests.Request())
-            return creds.token
-
-
         def run_git(*args):
             r = subprocess.run(["git"] + list(args),
                                capture_output=True, text=True, cwd=WORKSPACE)
@@ -211,25 +180,14 @@ spec:
 
 
         def call_claude(system, user_msg):
-            token = get_access_token()
-            body = json.dumps({
-                "anthropic_version": "vertex-2023-10-16",
-                "max_tokens": MAX_TOKENS,
-                "system": system,
-                "messages": [{"role": "user", "content": user_msg}]
-            }).encode()
-            req = urllib.request.Request(API_URL, data=body, headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            })
-            try:
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    data = json.loads(resp.read())
-                return data["content"][0]["text"]
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode()
-                print(f"Vertex AI error ({e.code}): {err_body}", file=sys.stderr)
-                sys.exit(1)
+            client = anthropic.Anthropic()
+            message = client.messages.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENS,
+                system=system,
+                messages=[{"role": "user", "content": user_msg}]
+            )
+            return message.content[0].text
 
 
         def parse_review(raw):
@@ -270,7 +228,7 @@ spec:
 
         def main():
             print("=" * 60)
-            print("  CLAUDE CODE REVIEW (via Vertex AI)")
+            print("  AI CODE REVIEW")
             print("=" * 60)
 
             rules = load_rules()
@@ -297,9 +255,7 @@ spec:
                 "Return your assessment as JSON."
             )
 
-            print(f"Calling Claude ({MODEL}) via Vertex AI...")
-            print(f"  Project: {GCP_PROJECT}")
-            print(f"  Region:  {GCP_REGION}")
+            print(f"Calling {MODEL}...")
             raw = call_claude(SYSTEM_PROMPT, user_msg)
 
             try:
@@ -358,7 +314,3 @@ spec:
 
 
         main()
-  volumes:
-    - name: gcp-sa-key
-      secret:
-        secretName: gcp-vertex-sa-key
