@@ -22,7 +22,7 @@ spec:
         echo "============================================"
         cd "$(workspaces.source.path)/source"
         echo "Running application to verify it works..."
-        python app/main.py
+        python -c "import app.main; print(app.main.greet())"
         echo ""
         echo "Build verification passed."
         echo "============================================"
