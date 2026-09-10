@@ -361,7 +361,8 @@ spec:
             suggestions = review.get("suggestions", [])
 
             print(f"\n{'=' * 60}")
-            print(f"  DECISION: {{'approve':'APPROVED','warn':'WARNING','block':'BLOCKED'}.get(decision, decision.upper())}")
+            labels = {"approve": "APPROVED", "warn": "WARNING", "block": "BLOCKED"}
+            print(f"  DECISION: {labels.get(decision, decision.upper())}")
             print(f"{'=' * 60}")
             print(f"\n{summary}\n")
 
