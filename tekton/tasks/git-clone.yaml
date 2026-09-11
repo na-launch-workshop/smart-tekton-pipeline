@@ -22,8 +22,7 @@ spec:
       image: alpine/git:2.43.0
       script: |
         #!/bin/sh
-        set -eu
-        git config --global http.sslVerify false
+        set -eu        
         echo "Cloning $(params.url) @ $(params.revision)"
         git clone --depth 1 --branch "$(params.revision)" \
           "$(params.url)" "$(workspaces.output.path)/source"
