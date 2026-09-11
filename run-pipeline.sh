@@ -10,7 +10,7 @@ echo "Repo      : $REPO"
 echo "Branch    : $BRANCH"
 echo ""
 
-oc apply -f tekton/tasks/ -f tekton/pipeline.yaml -n "$NAMESPACE" --quiet
+oc apply -f tekton/tasks/ -f tekton/pipeline.yaml -n "$NAMESPACE"
 
 oc create -n "$NAMESPACE" -f - <<EOF
 apiVersion: tekton.dev/v1
