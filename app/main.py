@@ -6,19 +6,21 @@ def greet(name="World"):
 
 
 def get_user(username):
-    conn = sqlite3.connect("app.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
-    return cursor.fetchone()
+    with sqlite3.connect("app.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+        return cursor.fetchone()
 
 
 def main():
-    message = greet()
-    print(message)
+    print(greet())
 
     user_input = input("Enter username: ")
-    user = get_user(user_input)
-    print(f"Found: {user}")
+    try:
+        user = get_user(user_input)
+        print(f"Found: {user}")
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
 
 
 if __name__ == "__main__":
