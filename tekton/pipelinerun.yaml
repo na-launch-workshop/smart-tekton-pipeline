@@ -9,7 +9,7 @@ spec:
     name: smart-pipeline
   params:
     - name: git-url
-      value: "https://gitlab-gitlab.apps.cluster-x7f6f.dyn.redhatworkshops.io/workshop/smart-tekton-pipeline.git"
+      value: "https://github.com/na-launch-workshop/smart-tekton-pipeline.git"
     - name: git-revision
       value: "main"
     - name: claude-model
